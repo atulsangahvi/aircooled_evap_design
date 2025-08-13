@@ -482,12 +482,24 @@ with right:
 
 st.markdown("---")
 st.markdown(
-    "
+    "**Models included**  \n"
+    "• **Zukauskas** (staggered tube-bank) and **Manglik–Bergles** (offset-strip) for air-side.  \n"
+    "• **Moist-air psychrometrics** implemented internally: saturation (Buck), humidity ratio, enthalpy, density, μ(T) (Sutherland), k(T) linear, cp(T,W).  \n"
+    "• **Wet-coil** heuristic via Lewis analogy factor.  \n"
+    "• **Fin efficiency** (infinite plate) → overall η_o.  \n"
+    "• **ε–NTU** with boiling on refrigerant side (C*→∞).  \n"
+    "• **Air ΔP** via correlation meta.  \n"
+    "• **Refrigerant ΔP**: homogeneous two-phase friction + single-phase vapor tail (CoolProp fluids if available)."
+)
+st.caption("Engineering caution: Generalized correlations; validate against your test data.")
+
+
 # ======================= DESIGN ADVISOR (minimal add-on) =======================
-# This block uses variables your script already computes and suggests targeted changes
-# to meet UA, ΔP, and refrigerant mass-flux goals.
+# The following block adds actionable suggestions using variables already computed.
+# Appends at end to avoid interfering with any multi-line strings above.
 
 import numpy as np
+import pandas as pd
 
 st.markdown("---")
 st.subheader("Design Advisor (what to change to meet target)")
@@ -508,31 +520,39 @@ try:
         ratio = UA_req / max(UA_air, 1e-9)
 
         # Rows/FPI/Area scaling: first-cut linear scaling of outside area Ao ~ UA (air-side dominated)
-        rows_needed = int(np.ceil(Nr * ratio))
-        fpi_needed  = int(np.clip(np.ceil(FPI * ratio), 6, 22))  # keep within allowed 6..22
-        area_needed = face_area * ratio
+        rows_needed = int(np.ceil(Nr * ratio)) if 'Nr' in globals() else None
+        fpi_needed  = int(np.clip(np.ceil(FPI * ratio), 6, 22)) if 'FPI' in globals() else None
+        area_needed = face_area * ratio if 'face_area' in globals() else None
 
         # Increase face velocity option (boost h): h ~ V^alpha (alpha ~= 0.6 plain, 0.8 offset-strip)
         model_name = str(air_model).lower() if 'air_model' in globals() else ""
         alpha = 0.6 if "zukauskas" in model_name else 0.8
-        v_needed = v_face * (ratio ** (1.0 / max(alpha, 0.25)))
-        dp_scale = (v_needed / max(v_face, 1e-6)) ** 2  # ΔP ~ V^2 approximation
+        v_needed = v_face * (ratio ** (1.0 / max(alpha, 0.25))) if 'v_face' in globals() else None
+        dp_scale = (v_needed / max(v_face, 1e-6)) ** 2 if ('v_needed' in locals() and v_needed is not None) else None  # ΔP ~ V^2 approximation
 
         advice_rows += [
             ("UA short by (W/K)", f"{gap:,.0f}"),
             ("UA ratio needed (×)", _fmt(ratio, 2)),
-            ("Rows →", f"{Nr} ➜ {rows_needed}"),
-            ("FPI →", f"{int(FPI)} ➜ {fpi_needed}"),
-            ("Face area (m²) →", f"{face_area:.3f} ➜ {area_needed:.3f}"),
-            (f"Face velocity (m/s) → (α≈{alpha:.1f})", f"{v_face:.2f} ➜ {v_needed:.2f} (ΔP ×{dp_scale:.2f})"),
         ]
+        if rows_needed is not None and 'Nr' in globals():
+            advice_rows += [("Rows →", f"{Nr} ➜ {rows_needed}")]
+        if fpi_needed is not None and 'FPI' in globals():
+            advice_rows += [("FPI →", f"{int(FPI)} ➜ {fpi_needed}")]
+        if area_needed is not None and 'face_area' in globals():
+            advice_rows += [("Face area (m²) →", f"{face_area:.3f} ➜ {area_needed:.3f}")]
+        if v_needed is not None and 'v_face' in globals():
+            dp_txt = f" (ΔP ×{dp_scale:.2f})" if dp_scale is not None else ""
+            advice_rows += [(f"Face velocity (m/s) → (α≈{alpha:.1f})", f"{v_face:.2f} ➜ {v_needed:.2f}{dp_txt}")]
 
-        advice_bullets += [
-            f"UA is short. Increase **rows** to ~{rows_needed}, or **FPI** to ~{fpi_needed}, "
-            f"or **face area** to ~{area_needed:.3f} m². Alternatively raise **face velocity** to ~{v_needed:.2f} m/s "
-            f"(expect air ΔP ×{dp_scale:.2f}).",
-            "Switching to **offset-strip/louvered fins** (if currently plain) will raise h but also ΔP."
-        ]
+        # Bullets
+        bullet = "UA is short. "
+        if rows_needed is not None: bullet += f"Increase **rows** to ~{rows_needed}, "
+        if fpi_needed is not None:  bullet += f"or **FPI** to ~{fpi_needed}, "
+        if area_needed is not None: bullet += f"or **face area** to ~{area_needed:.3f} m², "
+        if v_needed is not None:    bullet += f"or raise **face velocity** to ~{v_needed:.2f} m/s"
+        if dp_scale is not None:    bullet += f" (expect air ΔP ×{dp_scale:.2f})."
+        advice_bullets += [bullet.strip().rstrip(',') + ".",
+                           "Switching to **offset-strip/louvered fins** (if currently plain) will raise h but also ΔP."]
     else:
         advice_bullets.append("UA meets requirement on this first cut. Fine-tune ΔP and psychrometrics if needed.")
 
@@ -606,13 +626,4 @@ try:
 except Exception as e:
     st.warning(f"Design Advisor skipped due to: {e}")
 # =================== END DESIGN ADVISOR (minimal add-on) ===================
-**Models included**  \n"
-    "• **Zukauskas** (staggered tube-bank) and **Manglik–Bergles** (offset-strip) for air-side.  \n"
-    "• **Moist-air psychrometrics** implemented internally: saturation (Buck), humidity ratio, enthalpy, density, μ(T) (Sutherland), k(T) linear, cp(T,W).  \n"
-    "• **Wet-coil** heuristic via Lewis analogy factor.  \n"
-    "• **Fin efficiency** (infinite plate) → overall η_o.  \n"
-    "• **ε–NTU** with boiling on refrigerant side (C*→∞).  \n"
-    "• **Air ΔP** via correlation meta.  \n"
-    "• **Refrigerant ΔP**: homogeneous two-phase friction + single-phase vapor tail (CoolProp fluids if available)."
-)
-st.caption("Engineering caution: Generalized correlations; validate against your test data.")
+
