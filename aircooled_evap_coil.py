@@ -167,11 +167,49 @@ def air_htc_manglik_bergles(props, geom, Nr, St, tf, mdot_air):
     meta = dict(model="Manglik–Bergles (offset-strip)", Re=Re_h, j=j, f=f, Vmax=Vmax, Dh=Dh, K=Kdp)
     return h, meta
 
-def air_dp_from_meta(props, meta):
+
+def air_dp_from_meta(props, meta, geom, Nr, St, tf):
+    """
+    More realistic air-side ΔP estimate using channel friction + entry/exit + row form losses.
+
+    For Manglik–Bergles (offset-strip): uses Fanning f from correlation:
+        ΔP ≈ [4 f (L/Dh) + K_entry + K_exit] * 0.5 * ρ * Vmax^2
+    For plain plate-fin with tube-bank (Zukauskas baseline):
+        Use hydraulic diameter Dh ≈ 2*s (parallel plates), friction factor:
+            f_D (Darcy) = 64/Re (laminar Re<2300) else 0.3164/Re^0.25
+        Convert to equivalent form:
+            ΔP ≈ [f_D (L/Dh) + K_entry + K_exit + K_row*Nr] * 0.5 * ρ * Vmax^2
+        where K_row ~ 0.9 per row (form drag due to tubes), K_entry ~0.5, K_exit ~1.0
+    """
     rho = props['rho']
-    V = meta['Vmax']
-    K = meta.get('K', 0.1)
-    return K * 0.5 * rho * V**2
+    Vmax = meta.get('Vmax', 0.0)
+    L = Nr * St  # coil depth
+    Dh = 2.0*geom['s']  # hydraulic diameter (parallel-plate proxy)
+
+    Re = max(rho*Vmax*Dh/max(props['mu'],1e-12), 1.0)
+
+    K_entry = 0.5
+    K_exit  = 1.0
+
+    if 'f' in meta and meta.get('model','').lower().startswith('manglik'):
+        # Fanning f from MB correlation
+        f_fanning = max(meta.get('f', 0.01), 0.001)
+        K_core = 4.0 * f_fanning * (L/max(Dh,1e-9))
+        K_total = K_core + K_entry + K_exit
+    else:
+        # Plain plate-fin + tube bank baseline
+        # Darcy friction factor
+        if Re < 2300.0:
+            f_D = 64.0/Re
+        else:
+            f_D = 0.3164/(Re**0.25)
+        K_row = 0.9  # per-row form loss (tunable)
+        K_core = f_D * (L/max(Dh,1e-9)) + K_row * max(Nr,1)
+        K_total = K_core + K_entry + K_exit
+
+    dP = K_total * 0.5 * rho * Vmax**2
+    return dP
+
 
 # ------------------ ε–NTU ------------------
 def UA_required_eNTU(Q_kW, mdot_air, cp_air, T_air_in_C, T_sat_evap_C):
@@ -297,8 +335,7 @@ with c3:
     k_fin = 200.0 if fin_mat == "Aluminum" else 380.0
 
 with c4:
-    air_model = st.selectbox("Air-side model", ["Zukauskas (tube-bank; plain fin baseline)",
-                                                 "Manglik–Bergles (offset-strip ≈ louvered)"])
+    fin_type = st.selectbox("Fin type", ["Plain plate (no louvers)", "Louvered / Offset-strip"])\n# Map fin_type to internal air_model label for backward compatibility\nair_model = "Zukauskas (tube-bank; plain fin baseline)" if fin_type.startswith("Plain") else "Manglik–Bergles (offset-strip ≈ louvered)"
     user_ho = st.number_input("Override h_air (W/m²K) [optional]", 0.0, 1500.0, 0.0, 1.0)
     wet_coil = st.checkbox("Wet coil (enhanced h via Lewis analogy)", value=True)
     wet_factor = st.slider("Wet enhancement factor (×)", 1.10, 1.80, 1.40, 0.01)
@@ -342,7 +379,7 @@ UA_air = Uo * Ao
 UA_req, eps_needed, NTU_needed = UA_required_eNTU(Q_kW, mdot_air, air_in_props['cp'], Tdb_in, T_sat_ev)
 
 # Air ΔP
-dP_air = air_dp_from_meta(air_in_props, meta)
+dP_air = air_dp_from_meta(air_in_props, meta, geom, Nr, St, tf)
 
 # Refrigerant-side checks & ΔP
 mdot_ref = mdot_ref_hr/3600.0
@@ -426,7 +463,7 @@ with left:
             f"{UA_req:,.0f}" if UA_req else "—",
             f"{eps_needed:.3f}" if eps_needed else "—",
             f"{NTU_needed:.3f}" if NTU_needed else "—",
-            f"{air_dp_from_meta(air_in_props, meta):,.0f}"
+            f"{air_dp_from_meta(air_in_props, meta, geom, Nr, St, tf):,.0f}"
         ]
     })
     st.dataframe(df_air, use_container_width=True)
