@@ -430,6 +430,11 @@ with left:
         ]
     })
     st.dataframe(df_air, use_container_width=True)
+    # --- ΔP Air metrics (explicit on-screen) ---
+    colA1, colA2 = st.columns(2)
+    colA1.metric("ΔP_air (Pa)", f"{(dP_air if ('dP_air' in globals()) and (dP_air is not None) else 0):,.0f}")
+    colA2.metric("Vmax (m/s)", f"{meta.get('Vmax',0):.2f}")
+
 
     st.subheader("ADP/BPF Result (psychrometrics)")
     df_psy = pd.DataFrame({
@@ -467,6 +472,12 @@ with right:
         ]
     })
     st.dataframe(df_ref, use_container_width=True)
+    # --- ΔP Refrigerant metrics (explicit on-screen) ---
+    colR1, colR2, colR3 = st.columns(3)
+    colR1.metric("ΔP_two-phase (kPa)", f"{((dp_tp or 0)/1000 if ('dp_tp' in globals()) else 0):.2f}")
+    colR2.metric("ΔP_vapor (kPa)", f"{((dp_vap or 0)/1000 if ('dp_vap' in globals()) else 0):.2f}")
+    colR3.metric("ΔP_total (kPa)", f"{((dp_ref_total or 0)/1000 if ('dp_ref_total' in globals()) else 0):.2f}")
+
 
     # ---------- Export buttons ----------
     with io.BytesIO() as buffer:
@@ -474,6 +485,21 @@ with right:
             df_air.to_excel(writer, index=False, sheet_name="Air_UA")
             df_psy.to_excel(writer, index=False, sheet_name="ADP_BPF")
             df_ref.to_excel(writer, index=False, sheet_name="Refrigerant")
+            # New sheet: combine key pressure drops for quick review
+            try:
+                pd_data = {
+                    "Item": ["ΔP_air (Pa)", "ΔP_two-phase (kPa)", "ΔP_vapor (kPa)", "ΔP_total_refrigerant (kPa)", "Mass flux G (kg/m²·s)"],
+                    "Value": [f"{dP_air:,.0f}" if "dP_air" in globals() and dP_air is not None else "—",
+                              f"{(dp_tp or 0)/1000:.2f}" if "dp_tp" in globals() and dp_tp is not None else "—",
+                              f"{(dp_vap or 0)/1000:.2f}" if "dp_vap" in globals() and dp_vap is not None else "—",
+                              f"{(dp_ref_total or 0)/1000:.2f}" if "dp_ref_total" in globals() and dp_ref_total is not None else "—",
+                              f"{G:,.0f}" if "G" in globals() and G is not None else "—"]
+                }
+                df_dp = pd.DataFrame(pd_data)
+                df_dp.to_excel(writer, index=False, sheet_name="Pressure_Drops")
+            except Exception as _e:
+                pass
+        
         xlsx_bytes = buffer.getvalue()
     st.download_button("Download XLSX", data=xlsx_bytes, file_name="evap_coil_firstcut.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
