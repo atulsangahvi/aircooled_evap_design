@@ -1,0 +1,7 @@
+streamlit
+pandas
+CoolProp
+matplotlib
+scipy
+numpy
+openpyxl
