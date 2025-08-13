@@ -335,9 +335,8 @@ with c3:
     k_fin = 200.0 if fin_mat == "Aluminum" else 380.0
 
 with c4:
-    fin_type = st.selectbox("Fin type", ["Plain plate (no louvers)", "Louvered / Offset-strip"])
-# Map fin_type to internal air_model label for backward compatibility
-air_model = "Zukauskas (tube-bank; plain fin baseline)" if fin_type.startswith("Plain") else "Manglik–Bergles (offset-strip ≈ louvered)"
+    air_model = st.selectbox("Air-side model", ["Zukauskas (tube-bank; plain fin baseline)",
+                                                 "Manglik–Bergles (offset-strip ≈ louvered)"])
     user_ho = st.number_input("Override h_air (W/m²K) [optional]", 0.0, 1500.0, 0.0, 1.0)
     wet_coil = st.checkbox("Wet coil (enhanced h via Lewis analogy)", value=True)
     wet_factor = st.slider("Wet enhancement factor (×)", 1.10, 1.80, 1.40, 0.01)
