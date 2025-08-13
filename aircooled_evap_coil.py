@@ -482,7 +482,131 @@ with right:
 
 st.markdown("---")
 st.markdown(
-    "**Models included**  \n"
+    "
+# ======================= DESIGN ADVISOR (minimal add-on) =======================
+# This block uses variables your script already computes and suggests targeted changes
+# to meet UA, ΔP, and refrigerant mass-flux goals.
+
+import numpy as np
+
+st.markdown("---")
+st.subheader("Design Advisor (what to change to meet target)")
+
+advice_rows = []     # for a table of computed targets
+advice_bullets = []  # short write-up bullets
+
+def _fmt(x, nd=2):
+    try:
+        return f"{x:.{nd}f}"
+    except Exception:
+        return str(x)
+
+try:
+    # --- 1) UA gap (if any) ---
+    if ('UA_req' in globals()) and ('UA_air' in globals()) and (UA_req is not None) and (UA_air is not None) and (UA_air < UA_req):
+        gap = UA_req - UA_air
+        ratio = UA_req / max(UA_air, 1e-9)
+
+        # Rows/FPI/Area scaling: first-cut linear scaling of outside area Ao ~ UA (air-side dominated)
+        rows_needed = int(np.ceil(Nr * ratio))
+        fpi_needed  = int(np.clip(np.ceil(FPI * ratio), 6, 22))  # keep within allowed 6..22
+        area_needed = face_area * ratio
+
+        # Increase face velocity option (boost h): h ~ V^alpha (alpha ~= 0.6 plain, 0.8 offset-strip)
+        model_name = str(air_model).lower() if 'air_model' in globals() else ""
+        alpha = 0.6 if "zukauskas" in model_name else 0.8
+        v_needed = v_face * (ratio ** (1.0 / max(alpha, 0.25)))
+        dp_scale = (v_needed / max(v_face, 1e-6)) ** 2  # ΔP ~ V^2 approximation
+
+        advice_rows += [
+            ("UA short by (W/K)", f"{gap:,.0f}"),
+            ("UA ratio needed (×)", _fmt(ratio, 2)),
+            ("Rows →", f"{Nr} ➜ {rows_needed}"),
+            ("FPI →", f"{int(FPI)} ➜ {fpi_needed}"),
+            ("Face area (m²) →", f"{face_area:.3f} ➜ {area_needed:.3f}"),
+            (f"Face velocity (m/s) → (α≈{alpha:.1f})", f"{v_face:.2f} ➜ {v_needed:.2f} (ΔP ×{dp_scale:.2f})"),
+        ]
+
+        advice_bullets += [
+            f"UA is short. Increase **rows** to ~{rows_needed}, or **FPI** to ~{fpi_needed}, "
+            f"or **face area** to ~{area_needed:.3f} m². Alternatively raise **face velocity** to ~{v_needed:.2f} m/s "
+            f"(expect air ΔP ×{dp_scale:.2f}).",
+            "Switching to **offset-strip/louvered fins** (if currently plain) will raise h but also ΔP."
+        ]
+    else:
+        advice_bullets.append("UA meets requirement on this first cut. Fine-tune ΔP and psychrometrics if needed.")
+
+    # --- 2) Air-side ΔP guardrail ---
+    if 'dP_air' in globals():
+        air_dp_limit = 150.0  # Pa, typical for comfort systems (adjust for fan budget)
+        if dP_air is not None and dP_air > air_dp_limit:
+            advice_rows += [("Air ΔP (Pa) (limit ~150)", f"{dP_air:,.0f} (>limit)")]
+            advice_bullets += [
+                f"**Air ΔP** is high (~{int(dP_air)} Pa). Reduce **FPI** or **rows**, or enlarge **face area** to lower velocity; "
+                "plain fins reduce ΔP vs. offset-strip."
+            ]
+
+    # --- 3) Refrigerant mass flux & ΔP (typical targets) ---
+    if 'G' in globals() and (G is not None):
+        G_low, G_high = 150.0, 400.0  # kg/m²·s typical evaporator band
+        advice_rows += [("Refrigerant mass flux G (kg/m²·s)", f"{G:,.0f} (target ~150–400)") ]
+        if ('N_circuits' in globals()) and (N_circuits is not None) and (N_circuits >= 1):
+            if G > G_high:
+                G_target = 320.0
+                N_circ_target = int(np.ceil(N_circuits * (G / G_target)))
+                advice_rows += [("Circuits →", f"{N_circuits} ➜ {N_circ_target}")]
+                advice_bullets += [
+                    f"**G is high** (~{int(G)}). Increase **circuits** to ~{N_circ_target} (or use larger **Di**) to reduce ΔP and stabilize boiling."
+                ]
+            elif G < G_low and N_circuits > 1:
+                G_target = 220.0
+                N_circ_target = max(1, int(np.floor(N_circuits * (G / G_target))))
+                advice_rows += [("Circuits →", f"{N_circuits} ➜ {N_circ_target}")]
+                advice_bullets += [
+                    f"**G is low** (~{int(G)}). Consider **fewer circuits** (~{N_circ_target}) to raise boiling HTC (watch distributor authority)."
+                ]
+
+    if 'dp_ref_total' in globals() and (dp_ref_total is not None):
+        dp_ref_limit = 70_000.0  # Pa (~70 kPa)
+        if dp_ref_total > dp_ref_limit:
+            advice_rows += [("Refrigerant ΔP total (kPa)", f"{dp_ref_total/1000:,.1f} (>70)")]
+            advice_bullets += [
+                "Refrigerant **ΔP is high**. Increase **circuits** or **Di**, shorten circuits (fewer tubes/pass), "
+                "or reduce **superheat length** if possible."
+            ]
+
+    # --- 4) Psychrometric consistency (sanity) ---
+    if ('Q_total_calc' in globals()) and (Q_total_calc is not None) and ('Q_kW' in globals()):
+        mismatch = abs(Q_total_calc - Q_kW) / max(Q_kW, 1e-6)
+        advice_rows += [("Q_psychro vs duty (kW)", f"{Q_total_calc:,.1f} vs {Q_kW:,.1f}")]
+        if mismatch > 0.15:
+            advice_bullets += [
+                f"Psychrometric load differs from design by ~{mismatch*100:0.1f}%. Revisit **ADP/BPF**, airflow, and air properties."
+            ]
+
+    # --- Render advisor outputs ---
+    if advice_rows:
+        df_advice = pd.DataFrame(advice_rows, columns=["Parameter / Action", "Suggested value"])
+        st.dataframe(df_advice, use_container_width=True)
+
+    if advice_bullets:
+        st.markdown("**Recommendations:**")
+        for b in advice_bullets:
+            st.markdown(f"- {b}")
+
+    # Optional: downloadable CSV
+    if advice_rows:
+        st.download_button(
+            "Download improvement suggestions (CSV)",
+            data=pd.DataFrame(advice_rows, columns=["Parameter/Action","Suggested value"]).to_csv(index=False),
+            file_name="design_improvements.csv",
+            mime="text/csv"
+        )
+
+except Exception as e:
+    st.warning(f"Design Advisor skipped due to: {e}")
+# =================== END DESIGN ADVISOR (minimal add-on) ===================
+**Models included**  \n"
     "• **Zukauskas** (staggered tube-bank) and **Manglik–Bergles** (offset-strip) for air-side.  \n"
     "• **Moist-air psychrometrics** implemented internally: saturation (Buck), humidity ratio, enthalpy, density, μ(T) (Sutherland), k(T) linear, cp(T,W).  \n"
     "• **Wet-coil** heuristic via Lewis analogy factor.  \n"
