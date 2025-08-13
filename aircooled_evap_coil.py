@@ -1,57 +1,89 @@
-# evap_coil_textbook_plus.py
+
+# evap_coil_textbook_plus_strict.py
 # Streamlit evaporator coil first-cut using textbook correlations
-# Adds: wet-coil factor, ADP/BPF psychrometrics, air & refrigerant ΔP, CSV/Excel export.
+# Robust moist-air psychrometrics implemented in pure Python (no HAPropsSI required).
+# Refrigerant properties via CoolProp PropsSI (still recommended).
 
 import math
-from math import pi, sqrt, tanh, log
+from math import pi, sqrt, tanh
 import numpy as np
 import pandas as pd
 import io
 import streamlit as st
 
-# ------------------ Props (CoolProp) ------------------
+# ------------------ Optional CoolProp for refrigerants ------------------
 try:
     import CoolProp.CoolProp as CP
-    from CoolProp.HumidAirProp import HAPropsSI
     COOLPROP = True
 except Exception:
     COOLPROP = False
 
 INCH = 0.0254
 MM = 1e-3
+P_ATM = 101325.0
+R_DA = 287.055  # J/kg-K, dry air gas constant
 
 def K(tC): return tC + 273.15
 def C(tK): return tK - 273.15
 
-def air_props(Tdb_C, RH_pct, P=101325.0):
-    if not COOLPROP:
-        # dry-air fallback (rough)
-        T = K(Tdb_C)
-        rho = 1.2
-        mu  = 1.85e-5
-        k   = 0.026
-        cp  = 1006.0
-        return dict(rho=rho, mu=mu, k=k, cp=cp, Pr=cp*mu/k)
-    rho = HAPropsSI("Rho","T",K(Tdb_C),"P",P,"R",RH_pct/100.0)
-    mu  = HAPropsSI("Mu","T",K(Tdb_C),"P",P,"R",RH_pct/100.0)
-    k   = HAPropsSI("K","T",K(Tdb_C),"P",P,"R",RH_pct/100.0)
-    cp  = HAPropsSI("C","T",K(Tdb_C),"P",P,"R",RH_pct/100.0)
-    Pr  = cp*mu/k
-    return dict(rho=rho, mu=mu, k=k, cp=cp, Pr=Pr)
+# ------------------ Moist-air psychrometrics (no CoolProp needed) ------------------
+def psat_water_Pa(T_C: float) -> float:
+    """Saturation vapor pressure over liquid water (Pa). Buck equation (good 0..50°C)."""
+    return 611.21 * math.exp((18.678 - T_C/234.5) * (T_C/(257.14 + T_C)))
 
-# Psychro helpers (need CoolProp)
-def state_from_T_RH(T_C, RH_pct, P=101325.0):
-    if not COOLPROP:
-        return dict(h=1006.0*(T_C-0), W=0.0, T=T_C, RH=RH_pct, P=P)
-    h = HAPropsSI("H","T",K(T_C),"P",P,"R",RH_pct/100.0)   # J/kg dry air
-    W = HAPropsSI("W","T",K(T_C),"P",P,"R",RH_pct/100.0)   # kg/kg
+def humidity_ratio_from_T_RH(T_C: float, RH_pct: float, P: float = P_ATM) -> float:
+    RH = max(min(RH_pct, 100.0), 0.1) / 100.0
+    Psat = psat_water_Pa(T_C)
+    Pv = RH * Psat
+    return 0.62198 * Pv / max(P - Pv, 1.0)
+
+def cp_moist_air_J_per_kgK(T_C: float, W: float) -> float:
+    """Specific heat of moist air per kg dry air (J/kg_da-K)."""
+    cp_da = 1006.0
+    cp_v = 1860.0
+    return cp_da + W * cp_v
+
+def h_moist_air_J_per_kg(T_C: float, W: float) -> float:
+    """Moist air enthalpy per kg dry air (J/kg_da)."""
+    return 1000.0 * (1.006 * T_C + W * (2501.0 + 1.86 * T_C))
+
+def rho_moist_air_kg_per_m3(T_C: float, W: float, P: float = P_ATM) -> float:
+    """Moist air density (kg/m3) using ideal-gas mixing (per kg moist air approximation)."""
+    T_K = K(T_C)
+    return P / (R_DA * T_K * (1.0 + 1.6078 * W))
+
+def mu_air_Pa_s(T_C: float) -> float:
+    """Dynamic viscosity via Sutherland's law for air (Pa·s)."""
+    T = K(T_C)
+    mu0 = 1.716e-5  # Pa·s at 273.15 K
+    S = 110.4  # K
+    return mu0 * ((T / 273.15) ** 1.5) * ((273.15 + S) / (T + S))
+
+def k_air_W_per_mK(T_C: float) -> float:
+    """Thermal conductivity of air (W/m-K); simple linear approx around room temp."""
+    # 0°C: ~0.024, 40°C: ~0.027
+    return 0.024 + (0.027 - 0.024) * (T_C / 40.0)
+
+def air_props(Tdb_C: float, RH_pct: float, P: float = P_ATM):
+    W = humidity_ratio_from_T_RH(Tdb_C, RH_pct, P)
+    rho = rho_moist_air_kg_per_m3(Tdb_C, W, P)
+    mu  = mu_air_Pa_s(Tdb_C)
+    k   = k_air_W_per_mK(Tdb_C)
+    cp  = cp_moist_air_J_per_kgK(Tdb_C, W)
+    Pr  = cp * mu / max(k, 1e-9)
+    return dict(rho=rho, mu=mu, k=k, cp=cp, Pr=Pr, W=W)
+
+def state_from_T_RH(T_C: float, RH_pct: float, P: float = P_ATM):
+    W = humidity_ratio_from_T_RH(T_C, RH_pct, P)
+    h = h_moist_air_J_per_kg(T_C, W)
     return dict(h=h, W=W, T=T_C, RH=RH_pct, P=P)
 
-def state_from_T_W(T_C, W, P=101325.0):
-    if not COOLPROP:
-        return dict(h=1006.0*(T_C-0), W=W, T=T_C, RH=None, P=P)
-    h = HAPropsSI("H","T",K(T_C),"P",P,"W",W)
-    RH = HAPropsSI("R","T",K(T_C),"P",P,"W",W)*100
+def state_from_T_W(T_C: float, W: float, P: float = P_ATM):
+    h = h_moist_air_J_per_kg(T_C, W)
+    # Back-calc RH roughly (optional; not used in core calcs)
+    Psat = psat_water_Pa(T_C)
+    Pv = W * P / (0.62198 + W)
+    RH = max(min(100.0 * Pv / max(Psat, 1.0), 100.0), 0.0)
     return dict(h=h, W=W, T=T_C, RH=RH, P=P)
 
 # ------------------ Fin efficiency ------------------
@@ -66,31 +98,24 @@ def geometry_areas(W, H, Nr, St, Sl, Do, tf, FPI):
     face_area = W*H
     depth = Nr*Sl
     fins_count = int(round(FPI*(depth/INCH)))
-    # tubes per row (vertical): assume horizontal tubes across width
     N_tpr = max(int(math.floor(H / St)), 1)
     N_tubes = N_tpr * Nr
     L_tube = W
-
-    # fin pitch and free area
-    s = (1.0/FPI) * INCH  # fin spacing (m)
+    s = (1.0/FPI) * INCH
     A_holes_one_fin = N_tubes * (pi*(Do/2)**2)
-    A_fin_one = max(2.0*(W*H - A_holes_one_fin), 0.0)  # both sides of one fin
+    A_fin_one = max(2.0*(W*H - A_holes_one_fin), 0.0)
     A_fin_total = A_fin_one * fins_count
-
     exposed_frac = max((s-tf)/max(s,1e-9), 0.0)
     A_bare = N_tubes * (pi * Do * L_tube) * exposed_frac
     A_total = A_fin_total + A_bare
-
     fin_blockage = min(tf/max(s,1e-9), 0.95)
     tube_blockage = min(A_holes_one_fin/max(W*H,1e-9), 0.5)
     A_min = max(face_area * (1.0 - fin_blockage - tube_blockage), 1e-4)
-
     return dict(face_area=face_area, depth=depth, fins=fins_count, s=s,
                 N_tpr=N_tpr, N_tubes=N_tubes, L_tube=L_tube,
                 A_fin=A_fin_total, A_bare=A_bare, A_total=A_total, A_min=A_min)
 
 # ------------------ Air side correlations ------------------
-# A) Zukauskas for staggered tube banks
 def zukauskas_constants(Re):
     Re = max(Re, 1.0)
     if 1e2 <= Re < 1e3:   C, m = 0.9, 0.4
@@ -113,18 +138,15 @@ def air_htc_zukauskas(props, geom, Do, Nr, mdot_air):
     Nu = C*(Re**m)*(Pr**0.36)
     Nu *= row_correction(Nr)
     h = Nu * k / Do
-    # crude air-side DP factor tied to Re & rows
-    K = 3.0 * Nr * 0.02
-    meta = dict(model="Zukauskas (tube-bank)", Re=Re, Nu=Nu, Vmax=Vmax, K=K)
+    Kdp = 3.0 * Nr * 0.02
+    meta = dict(model="Zukauskas (tube-bank)", Re=Re, Nu=Nu, Vmax=Vmax, K=Kdp)
     return h, meta
 
-# B) Manglik–Bergles for offset-strip fin (compact HX family)
 def manglik_bergles_jf(Re, Pr, s_l, s_t, t_fin, L_off=0.003):
     phi1 = max(s_l/L_off, 1e-6)
     phi2 = max(s_t/L_off, 1e-6)
     phi3 = max(t_fin/L_off, 1e-6)
     Re = max(Re, 1.0)
-    # j (dimensionless) and f (Fanning) compact forms capturing their original trends
     j = (0.6522*(Re**-0.5403)*(1 + (5.269e-5*(Re**1.340)) * (phi1**0.504)) *
          (1 + (Re/2712.0)**1.279)**0.928 *
          (1 + (phi3/phi2)**3.537)**0.1) * (Pr**(-1/3))
@@ -135,15 +157,14 @@ def manglik_bergles_jf(Re, Pr, s_l, s_t, t_fin, L_off=0.003):
 
 def air_htc_manglik_bergles(props, geom, Nr, St, tf, mdot_air):
     rho, mu, k, Pr = props['rho'], props['mu'], props['k'], props['Pr']
-    Dh = 2.0*geom['s']           # parallel-plate proxy
+    Dh = 2.0*geom['s']
     Vmax = mdot_air/(rho*geom['A_min'])
     Re_h = rho*Vmax*Dh/max(mu,1e-12)
     j, f = manglik_bergles_jf(Re_h, Pr, s_l=geom['s'], s_t=max(St, geom['s']), t_fin=tf, L_off=0.003)
-    St = j*(Pr**(2.0/3.0))
-    h = St * rho * Vmax * props['cp']
-    # ΔP via Fanning friction f (rows as length multiplier)
-    K = 4.0 * Nr * max(f, 1e-3)
-    meta = dict(model="Manglik–Bergles (offset-strip)", Re=Re_h, j=j, f=f, Vmax=Vmax, Dh=Dh, K=K)
+    Stj = j*(Pr**(2.0/3.0))
+    h = Stj * rho * Vmax * props['cp']
+    Kdp = 4.0 * Nr * max(f, 1e-3)
+    meta = dict(model="Manglik–Bergles (offset-strip)", Re=Re_h, j=j, f=f, Vmax=Vmax, Dh=Dh, K=Kdp)
     return h, meta
 
 def air_dp_from_meta(props, meta):
@@ -152,7 +173,7 @@ def air_dp_from_meta(props, meta):
     K = meta.get('K', 0.1)
     return K * 0.5 * rho * V**2
 
-# ------------------ ε–NTU (boiling side ~ infinite C) ------------------
+# ------------------ ε–NTU ------------------
 def UA_required_eNTU(Q_kW, mdot_air, cp_air, T_air_in_C, T_sat_evap_C):
     Q = Q_kW*1000.0
     C_air = mdot_air*cp_air
@@ -163,16 +184,14 @@ def UA_required_eNTU(Q_kW, mdot_air, cp_air, T_air_in_C, T_sat_evap_C):
     UA = NTU * C_air
     return UA, eps, NTU
 
-# ------------------ Refrigerant side (homogeneous two-phase) ------------------
+# ------------------ Refrigerant side (homogeneous two-phase ΔP) ------------------
 def mixture_density(x, rho_l, rho_g):
     return 1.0 / (x/max(rho_g,1e-12) + (1.0-x)/max(rho_l,1e-12))
 
 def mixture_viscosity_McAdams(x, mu_l, mu_g):
-    # μ_mix ≈ μ_l^(1−x) μ_g^x
     return (mu_l**(1.0-x))*(mu_g**x)
 
 def dp_fric_homogeneous(G, Di, L, x_mean, rho_l, rho_g, mu_l, mu_g):
-    # Blasius f for turbulent: f = 0.3164 / Re^0.25
     mu_m = mixture_viscosity_McAdams(x_mean, mu_l, mu_g)
     rho_m = mixture_density(x_mean, rho_l, rho_g)
     Re_m = G*Di/max(mu_m,1e-12)
@@ -186,9 +205,8 @@ def dp_single_phase(G, Di, L, rho, mu):
     dp = f * (L/max(Di,1e-12)) * (G**2/(2.0*max(rho,1e-9)))
     return dp, dict(Re=Re, f=f)
 
-# ------------------ ADP/BPF block ------------------
+# ------------------ ADP/BPF ------------------
 def estimate_bpf(Nr, FPI, v_face):
-    # rough trend: deeper & tighter fins => lower BPF
     base = 0.20
     depth_factor = min(0.08*Nr, 0.6)
     fpi_factor   = min(0.006*(FPI-10), 0.15) if FPI>=10 else -0.04
@@ -197,31 +215,35 @@ def estimate_bpf(Nr, FPI, v_face):
     return float(np.clip(bpf, 0.03, 0.25))
 
 def adp_bpf_leaving(air_in, ADP_C, BPF):
-    # Along a straight line on the psych chart (ADP line): h_out = h_ADP + BPF*(h_in - h_ADP)
-    if not COOLPROP:
-        return dict(T_out=ADP_C + BPF*(air_in['T']-ADP_C),
-                    h_out=air_in['h']*BPF, W_out=air_in['W']*BPF) # very rough fallback
-    h_ADP = HAPropsSI("H","T",K(ADP_C),"P",air_in['P'],"R",1.0)  # saturated at ADP
-    W_ADP = HAPropsSI("W","T",K(ADP_C),"P",air_in['P'],"R",1.0)
+    # Saturated enthalpy and humidity at ADP using our formulas
+    Psat = psat_water_Pa(ADP_C)
+    W_ADP = 0.62198 * Psat / max(P_ATM - Psat, 1.0)
+    h_ADP = h_moist_air_J_per_kg(ADP_C, W_ADP)
     h_out = h_ADP + BPF*(air_in['h'] - h_ADP)
-    # Find leaving state at same line: use h & ADP line intersection -> iterate on T to match h
-    # Practical shortcut: assume the leaving point lies along a straight mix line towards ADP in (h,W)
     W_out = W_ADP + BPF*(air_in['W'] - W_ADP)
-    # Compute T_out from (h_out,W_out)
-    T_out = C(HAPropsSI("T","H",h_out,"P",air_in['P'],"W",W_out))
+    # Approximate T_out by solving enthalpy equation iteratively (simple secant)
+    def f_T(Tc):
+        return h_moist_air_J_per_kg(Tc, W_out) - h_out
+    T1, T2 = ADP_C, air_in['T']
+    for _ in range(20):
+        f1, f2 = f_T(T1), f_T(T2)
+        if abs(f2 - f1) < 1e-6: break
+        T3 = T2 - f2*(T2-T1)/max(f2-f1, 1e-6)
+        T1, T2 = T2, T3
+    T_out = T2
     return dict(T_out=T_out, h_out=h_out, W_out=W_out)
 
 # ============================================================
 # UI
 # ============================================================
-st.set_page_config(page_title="Evaporator Coil Designer (Textbook+Wet/ADP/ΔP)", layout="wide")
-st.title("Evaporator Coil Designer — Textbook correlations + Wet coil + ADP/BPF + ΔP")
+st.set_page_config(page_title="Evaporator Coil Designer (No-HAPropsSI)", layout="wide")
+st.title("Evaporator Coil Designer — Textbook + Wet coil + ADP/BPF + ΔP (no HAPropsSI)")
 
 with st.sidebar:
     st.header("Load & Air")
     Q_kW = st.number_input("Cooling load (kW)", 1.0, 5000.0, 50.0, 1.0)
     Tdb_in = st.number_input("Entering air dry-bulb (°C)", -20.0, 60.0, 27.0, 0.1)
-    RH_in  = st.number_input("Entering air RH (%)", 0.0, 100.0, 50.0, 1.0)
+    RH_in  = st.number_input("Entering air RH (%)", 0.1, 100.0, 50.0, 0.1)
     T_sat_ev = st.number_input("Evap saturation temp (°C)", -40.0, 20.0, 6.0, 0.1)
 
     st.markdown("---")
@@ -231,7 +253,7 @@ with st.sidebar:
     H = st.number_input("Face height H (m)", 0.2, 4.0, 1.0, 0.05)
 
     st.markdown("---")
-    st.subheader("Refrigerant")
+    st.subheader("Refrigerant (CoolProp for fluids)")
     if COOLPROP:
         fluids = CP.get_global_param_string("fluids_list").split(',')
         pref = [f for f in ["R410A","R454B","R32","R407C","R134a","R290","R22","R513A","R1234yf","CO2"] if f in fluids]
@@ -278,7 +300,7 @@ with c4:
     air_model = st.selectbox("Air-side model", ["Zukauskas (tube-bank; plain fin baseline)",
                                                  "Manglik–Bergles (offset-strip ≈ louvered)"])
     user_ho = st.number_input("Override h_air (W/m²K) [optional]", 0.0, 1500.0, 0.0, 1.0)
-    wet_coil = st.checkbox("Wet coil (enhanced h by Lewis analogy)", value=True)
+    wet_coil = st.checkbox("Wet coil (enhanced h via Lewis analogy)", value=True)
     wet_factor = st.slider("Wet enhancement factor (×)", 1.10, 1.80, 1.40, 0.01)
 
 # Air / Flow
@@ -309,7 +331,7 @@ else:
 h_air = h_air_dry * (wet_factor if wet_coil else 1.0)
 
 # Fin/overall efficiency & UA_air
-Lc = min(0.5*geom['s'], 0.003)  # characteristic half-gap capped
+Lc = min(0.5*geom['s'], 0.003)
 eta_f = fin_efficiency_infinite_plate(h_air, k_fin, tf, Lc)
 Ao = geom['A_total']
 eta_o = 1.0 - (geom['A_fin']/max(Ao,1e-9))*(1.0 - eta_f)
@@ -328,7 +350,6 @@ mdot_per = mdot_ref/max(N_circuits,1)
 Ai_in = pi*(Di**2)/4.0
 G = mdot_per/max(Ai_in,1e-12)
 
-h_tp = None
 rho_l = rho_g = mu_l = mu_g = None
 if COOLPROP and ref in CP.get_global_param_string("fluids_list").split(','):
     T_sat = K(T_sat_ev)
@@ -336,29 +357,17 @@ if COOLPROP and ref in CP.get_global_param_string("fluids_list").split(','):
     rho_g = CP.PropsSI("D","T",T_sat,"Q",1.0,ref)
     mu_l  = CP.PropsSI("V","T",T_sat,"Q",0.0,ref)
     mu_g  = CP.PropsSI("V","T",T_sat,"Q",1.0,ref)
-    k_l   = CP.PropsSI("L","T",T_sat,"Q",0.0,ref)
-    cp_l  = CP.PropsSI("C","T",T_sat,"Q",0.0,ref)
-    Pr_l  = cp_l*mu_l/k_l
-    # Liquid-only estimate (Dittus-Boelter) for reference HTC
-    Re_lo = G*Di/max(mu_l,1e-12)
-    Nu_lo = 0.023*(Re_lo**0.8)*(Pr_l**0.4)
-    h_lo  = Nu_lo*k_l/max(Di,1e-12)
-    # Two-phase HTC simple boost (placeholder): factor 1.2–2.0 typical; keep h_air dominant
-    h_tp = max(1.2*h_lo, h_lo)
 
-# Per-circuit length (no bends counted — first cut)
 tubes_per_circ = max(int(round(geom['N_tubes']/max(N_circuits,1))), 1)
 L_circ = tubes_per_circ * geom['L_tube']
-
-# Two-phase frictional ΔP (homogeneous), assume evaporation zone length fraction (1 - Lsh_frac)
 Lsh_frac = st.slider("Superheat zone length fraction of circuit", 0.00, 0.40, 0.10, 0.01)
 L_tp = L_circ * (1.0 - Lsh_frac)
 L_sh = L_circ * Lsh_frac
-x_mean = 0.5  # average quality in boiling region (first cut)
+x_mean = 0.5
 
 dp_tp = dp_vap = None
 meta_tp = meta_v = {}
-if (rho_l and rho_g and mu_l and mu_g) is not None:
+if all(v is not None for v in [rho_l, rho_g, mu_l, mu_g]) and Ai_in > 0:
     if L_tp > 0:
         dp_tp, meta_tp = dp_fric_homogeneous(G, Di, L_tp, x_mean, rho_l, rho_g, mu_l, mu_g)
     if L_sh > 0:
@@ -372,23 +381,18 @@ st.subheader("ADP / Bypass Factor (psychrometrics)")
 adp_mode = st.radio("ADP/BPF inputs", ["Estimate BPF from geometry & velocity", "Manually specify ADP & BPF"], horizontal=True)
 if adp_mode == "Estimate BPF from geometry & velocity":
     BPF = estimate_bpf(Nr, FPI, v_face)
-    ADP_C = T_sat_ev + 2.0  # common first cut
+    ADP_C = T_sat_ev + 2.0
 else:
     ADP_C = st.number_input("ADP (°C)", -10.0, 25.0, T_sat_ev + 2.0, 0.1)
     BPF = st.slider("Bypass factor", 0.02, 0.30, 0.10, 0.005)
 
-air_in = state_from_T_RH(Tdb_in, RH_in) if COOLPROP else dict(h=1006*(Tdb_in-0), W=0.0, T=Tdb_in, P=101325)
+air_in = state_from_T_RH(Tdb_in, RH_in)
 leave = adp_bpf_leaving(air_in, ADP_C, BPF)
 
-if COOLPROP:
-    mdot_dryair = mdot_air   # HAProps returns per kg *dry* air; our mdot from bulk density is close enough here
-    Q_total_calc = mdot_dryair * (air_in['h'] - leave['h_out'])/1000.0  # kW
-    # sensible estimate:
-    cp_da = air_in_props['cp']
-    Q_sens_est = mdot_air*cp_da*(air_in['T'] - leave['T_out'])/1000.0
-else:
-    Q_total_calc = Q_kW
-    Q_sens_est = Q_kW * 0.7
+mdot_dryair = mdot_air  # close enough for first cut
+Q_total_calc = mdot_dryair * (air_in['h'] - leave['h_out'])/1000.0  # kW
+cp_da = air_in_props['cp']
+Q_sens_est = mdot_air*cp_da*(air_in['T'] - leave['T_out'])/1000.0
 
 # ------------------ Tables & Export ------------------
 left, right = st.columns([1.2,1.0])
@@ -410,7 +414,7 @@ with left:
         "Value":[
             f"{Q_kW:,.1f}", f"{face_area:,.3f}", f"{v_face:,.2f}", f"{vol_flow*3600:,.0f}",
             f"{Nr}", f"{FPI:.0f}", f"{tf/MM:.2f}", f"{fin_mat}",
-            f"{Do/MM:.3f}", f"{ti/MM:.2f}", f"{St/MM:.1f}",
+            f"{Do/MM:.3f}", f"{(Do-Di)/2/MM:.2f}", f"{St/MM:.1f}",
             f"{geom['N_tpr']}", f"{geom['N_tubes']}",
             f"{geom['depth']:.3f}", f"{geom['fins']}", f"{geom['A_min']:.3f}",
             meta.get("model",""), f"{meta.get('Vmax',0):.2f}",
@@ -433,12 +437,9 @@ with left:
                 "W_in (kg/kg)","W_out (kg/kg)","Q_total from psychro (kW)","Q_sensible est (kW)"],
         "Value":[
             f"{ADP_C:.2f}", f"{BPF:.03f}", f"{leave['T_out']:.2f}",
-            f"{air_in['h']/1000:.2f}" if COOLPROP else "—",
-            f"{leave['h_out']/1000:.2f}" if COOLPROP else "—",
-            f"{air_in['W']:.5f}" if COOLPROP else "—",
-            f"{leave['W_out']:.5f}" if COOLPROP else "—",
-            f"{Q_total_calc:,.1f}" if COOLPROP else "—",
-            f"{Q_sens_est:,.1f}"
+            f"{air_in['h']/1000:.2f}", f"{leave['h_out']/1000:.2f}",
+            f"{air_in['W']:.5f}", f"{leave['W_out']:.5f}",
+            f"{Q_total_calc:,.1f}", f"{Q_sens_est:,.1f}"
         ]
     })
     st.dataframe(df_psy, use_container_width=True)
@@ -447,14 +448,14 @@ with right:
     st.subheader("Refrigerant Side (ΔP & sanity)")
     df_ref = pd.DataFrame({
         "Metric":[
-            "Refrigerant","ṁ_ref total (kg/s)","Circuits","ṁ per circuit (kg/s)",
+            "Refrigerant","CoolProp available?","ṁ_ref total (kg/s)","Circuits","ṁ per circuit (kg/s)",
             "Di (mm)","G per circuit (kg/m²·s)","Tubes/circuit (est.)","L_circuit (m)",
             "Two-phase length L_tp (m)","Vapor length L_sh (m)",
             "ρ_l (kg/m³)","ρ_g (kg/m³)","μ_l (Pa·s)","μ_g (Pa·s)",
             "ΔP_tp (kPa)","ΔP_vapor (kPa)","ΔP_total (kPa)"
         ],
         "Value":[
-            f"{ref}", f"{mdot_ref:.3f}", f"{N_circuits}", f"{mdot_per:.4f}",
+            f"{ref}", f"{'Yes' if COOLPROP else 'No'}", f"{mdot_ref:.3f}", f"{N_circuits}", f"{mdot_per:.4f}",
             f"{Di/MM:.2f}", f"{G:,.0f}", f"{tubes_per_circ}", f"{L_circ:.2f}",
             f"{L_tp:.2f}", f"{L_sh:.2f}",
             f"{rho_l:.1f}" if rho_l else "—",
@@ -468,7 +469,6 @@ with right:
     st.dataframe(df_ref, use_container_width=True)
 
     # ---------- Export buttons ----------
-    st.subheader("Export")
     with io.BytesIO() as buffer:
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             df_air.to_excel(writer, index=False, sheet_name="Air/UA")
@@ -483,12 +483,12 @@ with right:
 st.markdown("---")
 st.markdown(
     "**Models included**  \n"
-    "• **Zukauskas** (staggered tube-bank) for external convection over plain plate-fin coils.  \n"
-    "• **Manglik–Bergles (1995)** (offset-strip fin) to approximate louvered/strongly interrupted fins.  \n"
-    "• **Wet-coil** heuristic via Lewis analogy (tunable enhancement factor).  \n"
-    "• **Fin efficiency** (infinite plate) → overall surface efficiency η_o.  \n"
+    "• **Zukauskas** (staggered tube-bank) and **Manglik–Bergles** (offset-strip) for air-side.  \n"
+    "• **Moist-air psychrometrics** implemented internally: saturation (Buck), humidity ratio, enthalpy, density, μ(T) (Sutherland), k(T) linear, cp(T,W).  \n"
+    "• **Wet-coil** heuristic via Lewis analogy factor.  \n"
+    "• **Fin efficiency** (infinite plate) → overall η_o.  \n"
     "• **ε–NTU** with boiling on refrigerant side (C*→∞).  \n"
-    "• **Air ΔP** derived from the selected air-side model.  \n"
-    "• **Refrigerant ΔP** via **homogeneous two-phase** friction + single-phase vapor in the superheat tail."
+    "• **Air ΔP** via correlation meta.  \n"
+    "• **Refrigerant ΔP**: homogeneous two-phase friction + single-phase vapor tail (CoolProp fluids if available)."
 )
-st.caption("Engineering caution: These generalized correlations are suitable for first cuts. Calibrate factors (esp. wet enhancement and BPF) with your own test data.")
+st.caption("Engineering caution: Generalized correlations; validate against your test data.")
