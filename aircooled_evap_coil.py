@@ -278,6 +278,10 @@ st.set_page_config(page_title="Evaporator Coil Designer (No-HAPropsSI)", layout=
 st.title("Evaporator Coil Designer — Textbook + Wet coil + ADP/BPF + ΔP (no HAPropsSI)")
 
 with st.sidebar:
+    st.subheader("Fin & Correlation")
+    fin_type = st.selectbox("Fin type", ["Plain plate (no louvers)", "Louvered / Offset-strip"])
+    # Map fin_type to internal air_model label
+    air_model = "Zukauskas (tube-bank; plain fin baseline)" if fin_type.startswith("Plain") else "Manglik–Bergles (offset-strip ≈ louvered)"
     st.header("Load & Air")
     Q_kW = st.number_input("Cooling load (kW)", 1.0, 5000.0, 50.0, 1.0)
     Tdb_in = st.number_input("Entering air dry-bulb (°C)", -20.0, 60.0, 27.0, 0.1)
@@ -335,12 +339,13 @@ with c3:
     k_fin = 200.0 if fin_mat == "Aluminum" else 380.0
 
 with c4:
-    air_model = st.selectbox("Air-side model", ["Zukauskas (tube-bank; plain fin baseline)",
-                                                 "Manglik–Bergles (offset-strip ≈ louvered)"])
+    # removed legacy Air-side model selectbox; using fin_type in sidebar
     user_ho = st.number_input("Override h_air (W/m²K) [optional]", 0.0, 1500.0, 0.0, 1.0)
     wet_coil = st.checkbox("Wet coil (enhanced h via Lewis analogy)", value=True)
     wet_factor = st.slider("Wet enhancement factor (×)", 1.10, 1.80, 1.40, 0.01)
 
+# Ensure air_model follows fin_type (safety override)
+air_model = "Zukauskas (tube-bank; plain fin baseline)" if fin_type.startswith("Plain") else "Manglik–Bergles (offset-strip ≈ louvered)"
 # Air / Flow
 air_in_props = air_props(Tdb_in, RH_in)
 face_area = W*H
