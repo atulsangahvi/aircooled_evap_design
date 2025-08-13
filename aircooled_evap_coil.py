@@ -471,7 +471,7 @@ with right:
     # ---------- Export buttons ----------
     with io.BytesIO() as buffer:
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            df_air.to_excel(writer, index=False, sheet_name="Air/UA")
+            df_air.to_excel(writer, index=False, sheet_name="Air_UA")
             df_psy.to_excel(writer, index=False, sheet_name="ADP_BPF")
             df_ref.to_excel(writer, index=False, sheet_name="Refrigerant")
         xlsx_bytes = buffer.getvalue()
