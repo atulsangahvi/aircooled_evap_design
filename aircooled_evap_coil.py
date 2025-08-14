@@ -87,7 +87,7 @@ def geometry_areas(W, H, Nr, St, Sl, Do, tf, FPI):
     depth = Nr*Sl  # includes half-pitch before first row and after last row
     # Fins count = FPI × coil length (height) / 0.0254
 
-    fins_count = int(round(FPI * (H/INCH)))
+    fins_count = int(round(FPI * (H/INCH))))
     N_tpr = max(int(math.floor(H / max(St,1e-9))), 1)  # tubes per row (vertical count)
     N_tubes = N_tpr * Nr
     L_tube = W
@@ -258,28 +258,29 @@ with st.sidebar:
     RH_in  = st.number_input("Entering RH (%)", 1.0, 100.0, 50.0, 0.5)
 
     st.subheader("Target OFF-coil air")
-st.markdown("—")
-st.checkbox("Use ADP/BPF override instead of target DB/RH", value=False, key="use_adp_bpf")
-if st.session_state.get("use_adp_bpf"):
-    ADP_override = st.number_input("ADP override (°C)", -20.0, 30.0, 8.0, 0.1)
-    BPF_override = st.number_input("BPF override (0–1)", 0.00, 0.50, 0.10, 0.01)
-
     Tdb_off_tgt = st.number_input("Target leaving dry-bulb (°C)", -10.0, 40.0, 14.0, 0.1)
     RH_off_tgt  = st.number_input("Target leaving RH (%)", 5.0, 100.0, 90.0, 0.5)
+
+    st.markdown("—")
+    use_adp_bpf = st.checkbox("Use ADP/BPF override instead of target DB/RH", value=False, key="use_adp_bpf")
+    if use_adp_bpf:
+        ADP_override = st.number_input("ADP override (°C)", -20.0, 30.0, 8.0, 0.1)
+        BPF_override = st.number_input("BPF override (0–1)", 0.00, 0.50, 0.10, 0.01)
 
     st.subheader("Fin & Correlation")
     fin_type = st.selectbox("Fin type", ["Plain plate (no louvers)", "Louvered / Offset-strip"])
 
     st.markdown("---")
-st.subheader("Fouling & Film Coefficients")
-st.subheader("Refrigerant h-method")
-h_method = st.selectbox("h_ref method", ["User estimate", "Shah (approx)"])
+    st.subheader("Fouling & Film Coefficients")
+    fouling_air_pct = st.number_input("Air-side fouling derate (%)", 0.0, 50.0, 10.0, 1.0)
+    fouling_ref_pct = st.number_input("Refrigerant-side fouling derate (%)", 0.0, 50.0, 10.0, 1.0)
+    h_ref_guess = st.number_input("Estimated refrigerant-side h (W/m²K)", 100.0, 8000.0, 1200.0, 50.0)
+    h_ref_override = st.number_input("Override h_ref (W/m²K) [optional]", 0.0, 20000.0, 0.0, 50.0)
 
-fouling_air_pct = st.number_input("Air-side fouling derate (%)", 0.0, 50.0, 10.0, 1.0)
-fouling_ref_pct = st.number_input("Refrigerant-side fouling derate (%)", 0.0, 50.0, 10.0, 1.0)
-h_ref_guess = st.number_input("Estimated refrigerant-side h (W/m²K)", 100.0, 8000.0, 1200.0, 50.0)
-h_ref_override = st.number_input("Override h_ref (W/m²K) [optional]", 0.0, 20000.0, 0.0, 50.0)
-st.subheader("Refrigerant (CoolProp for fluids)")
+    st.subheader("Refrigerant h-method")
+    h_method = st.selectbox("h_ref method", ["User estimate", "Shah (approx)"])
+
+    st.subheader("Refrigerant (CoolProp for fluids)")
     if COOLPROP:
         fluids = CP.get_global_param_string("fluids_list").split(',')
         pref = [f for f in ["R410A","R454B","R32","R407C","R134a","R290","R22","R513A","R1234yf","CO2"] if f in fluids]
@@ -293,7 +294,6 @@ st.subheader("Refrigerant (CoolProp for fluids)")
     N_circuits = st.number_input("Refrigerant circuits (parallel)", 1, 48, 8, 1)
     T_cond   = st.number_input("Condenser saturation temp (°C)", 25.0, 70.0, 45.0, 0.5)
     Subcool  = st.number_input("Liquid subcooling (K)", 0.0, 20.0, 5.0, 0.5)
-
 st.markdown("### Geometry & Fins")
 c1, c2, c3, c4 = st.columns(4)
 with c1:
@@ -351,7 +351,7 @@ eta_o = 1.0 - (geom['A_fin']/max(Ao,1e-9))*(1.0 - eta_f)
 Uo = eta_o * h_air
 UA_air = Uo * Ao
 h_air_eff = h_air * (1.0 - fouling_air_pct/100.0)
-h_ref_raw = h_ref_override if h_ref_override > 0 else h_ref_guess
+h_ref_raw = (h_ref_shah if (h_method == "Shah (approx)" and "h_ref_shah" in globals() and h_ref_shah is not None) else (h_ref_override if h_ref_override > 0 else h_ref_guess))
 h_ref_eff = h_ref_raw * (1.0 - fouling_ref_pct/100.0)
 Uo_air_only = eta_o * h_air_eff
 
@@ -442,7 +442,7 @@ Q_psy_tgt_kW = mdot_air * (air_in_props['h'] - air_out_tgt['h']) / 1000.0
 # If ADP/BPF override is enabled, compute h_out from h_ADP + BPF*(h_in - h_ADP)
 Q_psy_override_kW = None
 air_out_override = None
-if st.session_state.get("use_adp_bpf"):
+if use_adp_bpf:
     try:
         W_ADP = humidity_ratio_from_T_RH(ADP_override, 100.0, P_ATM)
         h_ADP = h_moist_air(ADP_override, W_ADP)
@@ -493,17 +493,13 @@ rows = [
     ("h_in (kJ/kg_da)", f"{h_in/1000.0:.2f}"),
     ("h_out target (kJ/kg_da)", f"{h_out_tgt/1000.0:.2f}")
 ]
-if st.session_state.get("use_adp_bpf"):
+if use_adp_bpf:
     rows += [
         ("ADP override (°C)", f"{ADP_override:.1f}"),
         ("BPF override (-)", f"{BPF_override:.3f}"),
         ("h_out override (kJ/kg_da)", f"{(air_out_override['h']/1000.0):.2f}" if air_out_override else "—")
     ]
 df_adp = pd.DataFrame(rows, columns=cols)
-
-    "Item":["ADP (°C)","BPF (est.)","h_in (kJ/kg_da)","h_out target (kJ/kg_da)"],
-    "Value":[f"{ADP_C:.1f}" if ADP_C is not None else "—", f"{BPF_est:.3f}", f"{h_in/1000.0:.2f}", f"{h_out_tgt/1000.0:.2f}"]
-})
 
 
 # Refrigerant-side load from cycle (if possible)
@@ -532,7 +528,7 @@ with left:
         "Metric":[
             "Design capacity (kW)","Airflow (m³/h)","Face area (m²)","Face velocity (m/s)",
             "Entering DB/RH","Target OFF DB/RH",
-            "Fin type","Rows","Tubes/row","Total tubes","FPI","Fin thickness (mm)","Tube OD (mm)","St (mm)","Sl (mm)",
+            "Fin type","Rows","Tubes/row","Total tubes","Fins (count)","FPI","Fin thickness (mm)","Tube OD (mm)","St (mm)","Sl (mm)",
             "Ao (m²)","A_fin (m²)","A_tube (m²)","η_f","η_o","h_air used (W/m²K)","UA_air (W/K)","UA_req (W/K)","U_air (W/m²K)","h_air (W/m²K)",
             "ΔP_air (Pa)","V_face (m/s)","Vmax (m/s)","Re_air"
         ],
@@ -596,7 +592,7 @@ if st.checkbox("Show psychrometric chart", value=True):
     # Points
     W_in = air_in_props["W"]
     T_in = air_in_props["T"]
-    if st.session_state.get("use_adp_bpf") and air_out_override:
+    if use_adp_bpf and air_out_override:
         T_out = air_out_override["T"]  # display ADP as reference T
         W_out = air_out_override["W"]
         label_out = "Leaving (override)"
