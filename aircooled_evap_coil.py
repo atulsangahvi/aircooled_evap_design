@@ -577,7 +577,6 @@ if st.checkbox("Show geometry details", value=False):
         ]
     })
     st.dataframe(audit, use_container_width=True)
-
 # ------------------ Psychrometric Chart ------------------
 st.markdown("### Psychrometric Chart (DB vs. Humidity Ratio)")
 if st.checkbox("Show psychrometric chart", value=True):
