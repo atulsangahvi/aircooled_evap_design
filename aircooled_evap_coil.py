@@ -87,7 +87,7 @@ def geometry_areas(W, H, Nr, St, Sl, Do, tf, FPI):
     depth = Nr*Sl  # includes half-pitch before first row and after last row
     # Fins count = FPI × coil length (height) / 0.0254
 
-    fins_count = int(round(FPI * (H/INCH))))
+    fins_count = int(round(FPI * (H/INCH)))
     N_tpr = max(int(math.floor(H / max(St,1e-9))), 1)  # tubes per row (vertical count)
     N_tubes = N_tpr * Nr
     L_tube = W
