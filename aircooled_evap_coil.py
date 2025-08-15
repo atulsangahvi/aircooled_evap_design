@@ -73,6 +73,25 @@ def air_props(Tdb_C: float, RH_pct: float, P: float = P_ATM):
     Pr  = cp * mu / max(k, 1e-9)
     return dict(rho=rho, mu=mu, k=k, cp=cp, Pr=Pr, W=W)
 
+
+# --- Additional psychrometric helpers (DB+WB <-> W/RH) ---
+def RH_from_T_W(T_C, W, P=P_ATM):
+    Pv = W*P/(0.62198 + W)
+    Ps = psat_water_Pa(T_C)
+    RH = max(min(100.0*Pv/max(Ps,1e-9), 100.0), 0.1)
+    return RH
+
+def humidity_ratio_from_T_WB(Tdb_C: float, Twb_C: float, P: float = P_ATM) -> float:
+    """
+    First-cut ASHRAE-style approximation for humidity ratio from dry-bulb and wet-bulb at pressure P.
+    T in °C. Returns W in kg/kg dry air.
+    W ≈ W_s(Twb) + [1.006*(Tdb - Twb)] / [2501 - 2.381*Twb]
+    """
+    Ps_wb = psat_water_Pa(Twb_C)
+    Ws_wb = 0.62198 * Ps_wb / max(P - Ps_wb, 1.0)
+    W = Ws_wb + (1.006*(Tdb_C - Twb_C)) / max(2501.0 - 2.381*Twb_C, 1e-3)
+    return float(max(W, 1e-6))
+
 def state_from_T_RH(T_C: float, RH_pct: float, P: float = P_ATM):
     W = humidity_ratio_from_T_RH(T_C, RH_pct, P)
     h = h_moist_air_J_per_kg(T_C, W)
@@ -96,224 +115,15 @@ def fin_efficiency_infinite_plate(h, k_fin, t_fin, Lc):
 # ------------------ Geometry & areas ------------------
 def geometry_areas(W, H, Nr, St, Sl, Do, tf, FPI):
     face_area = W*H
-    depth = Nr*Sl
-    fins_count = int(round(FPI*(depth/INCH)))
-    N_tpr = max(int(math.floor(H / St)), 1)
-    N_tubes = N_tpr * Nr
-    L_tube = W
-    s = (1.0/FPI) * INCH
-    A_holes_one_fin = N_tubes * (pi*(Do/2)**2)
-    A_fin_one = max(2.0*(W*H - A_holes_one_fin), 0.0)
-    A_fin_total = A_fin_one * fins_count
-    exposed_frac = max((s-tf)/max(s,1e-9), 0.0)
-    A_bare = N_tubes * (pi * Do * L_tube) * exposed_frac
-    A_total = A_fin_total + A_bare
-    fin_blockage = min(tf/max(s,1e-9), 0.95)
-    tube_blockage = min(A_holes_one_fin/max(W*H,1e-9), 0.5)
-    A_min = max(face_area * (1.0 - fin_blockage - tube_blockage), 1e-4)
-    return dict(face_area=face_area, depth=depth, fins=fins_count, s=s,
-                N_tpr=N_tpr, N_tubes=N_tubes, L_tube=L_tube,
-                A_fin=A_fin_total, A_bare=A_bare, A_total=A_total, A_min=A_min)
-
-# ------------------ Air side correlations ------------------
-def zukauskas_constants(Re):
-    Re = max(Re, 1.0)
-    if 1e2 <= Re < 1e3:   C, m = 0.9, 0.4
-    elif 1e3 <= Re < 2e5: C, m = 0.27, 0.63
-    else:                 C, m = (0.27, 0.63) if Re >= 2e5 else (0.9, 0.4)
-    return C, m
-
-def row_correction(Nr):
-    if Nr <= 1: return 0.70
-    if Nr == 2: return 0.80
-    if Nr == 3: return 0.88
-    if Nr == 4: return 0.94
-    return 1.00
-
-def air_htc_zukauskas(props, geom, Do, Nr, mdot_air):
-    rho, mu, k, Pr = props['rho'], props['mu'], props['k'], props['Pr']
-    Vmax = mdot_air/(rho*geom['A_min'])
-    Re = rho*Vmax*Do/max(mu,1e-12)
-    C, m = zukauskas_constants(Re)
-    Nu = C*(Re**m)*(Pr**0.36)
-    Nu *= row_correction(Nr)
-    h = Nu * k / Do
-    Kdp = 3.0 * Nr * 0.02
-    meta = dict(model="Zukauskas (tube-bank)", Re=Re, Nu=Nu, Vmax=Vmax, K=Kdp)
-    return h, meta
-
-def manglik_bergles_jf(Re, Pr, s_l, s_t, t_fin, L_off=0.003):
-    phi1 = max(s_l/L_off, 1e-6)
-    phi2 = max(s_t/L_off, 1e-6)
-    phi3 = max(t_fin/L_off, 1e-6)
-    Re = max(Re, 1.0)
-    j = (0.6522*(Re**-0.5403)*(1 + (5.269e-5*(Re**1.340)) * (phi1**0.504)) *
-         (1 + (Re/2712.0)**1.279)**0.928 *
-         (1 + (phi3/phi2)**3.537)**0.1) * (Pr**(-1/3))
-    f = (9.6243*(Re**-0.7422)*(1 + (1.0/ ( (phi1)**0.185 )) ) *
-         (1 + (Re/2712.0)**1.5)**0.17 *
-         (1 + (phi3/phi2)**0.5))
-    return j, f
-
-def air_htc_manglik_bergles(props, geom, Nr, St, tf, mdot_air):
-    rho, mu, k, Pr = props['rho'], props['mu'], props['k'], props['Pr']
-    Dh = 2.0*geom['s']
-    Vmax = mdot_air/(rho*geom['A_min'])
-    Re_h = rho*Vmax*Dh/max(mu,1e-12)
-    j, f = manglik_bergles_jf(Re_h, Pr, s_l=geom['s'], s_t=max(St, geom['s']), t_fin=tf, L_off=0.003)
-    Stj = j*(Pr**(2.0/3.0))
-    h = Stj * rho * Vmax * props['cp']
-    Kdp = 4.0 * Nr * max(f, 1e-3)
-    meta = dict(model="Manglik–Bergles (offset-strip)", Re=Re_h, j=j, f=f, Vmax=Vmax, Dh=Dh, K=Kdp)
-    return h, meta
-
-def air_dp_from_meta(props, meta):
-    rho = props['rho']
-    V = meta['Vmax']
-    K = meta.get('K', 0.1)
-    return K * 0.5 * rho * V**2
-
-# ------------------ ε–NTU ------------------
-def UA_required_eNTU(Q_kW, mdot_air, cp_air, T_air_in_C, T_sat_evap_C):
-    Q = Q_kW*1000.0
-    C_air = mdot_air*cp_air
-    DTstar = (T_air_in_C - T_sat_evap_C)
-    if DTstar <= 0 or C_air <= 0: return None, None, None
-    eps = min(max(Q/(C_air*DTstar), 1e-6), 0.999999)
-    NTU = -math.log(1.0 - eps)
-    UA = NTU * C_air
-    return UA, eps, NTU
-
-# ------------------ Refrigerant side (homogeneous two-phase ΔP) ------------------
-def mixture_density(x, rho_l, rho_g):
-    return 1.0 / (x/max(rho_g,1e-12) + (1.0-x)/max(rho_l,1e-12))
-
-def mixture_viscosity_McAdams(x, mu_l, mu_g):
-    return (mu_l**(1.0-x))*(mu_g**x)
-
-def dp_fric_homogeneous(G, Di, L, x_mean, rho_l, rho_g, mu_l, mu_g):
-    mu_m = mixture_viscosity_McAdams(x_mean, mu_l, mu_g)
-    rho_m = mixture_density(x_mean, rho_l, rho_g)
-    Re_m = G*Di/max(mu_m,1e-12)
-    f = 0.3164 / max(Re_m,1.0)**0.25
-    dp = f * (L/max(Di,1e-12)) * (G**2/(2.0*max(rho_m,1e-9)))
-    return dp, dict(Re_m=Re_m, f=f, rho_m=rho_m, mu_m=mu_m)
-
-def dp_single_phase(G, Di, L, rho, mu):
-    Re = G*Di/max(mu,1e-12)
-    f = 0.3164 / max(Re,1.0)**0.25
-    dp = f * (L/max(Di,1e-12)) * (G**2/(2.0*max(rho,1e-9)))
-    return dp, dict(Re=Re, f=f)
-
-# ------------------ ADP/BPF ------------------
-def estimate_bpf(Nr, FPI, v_face):
-    base = 0.20
-    depth_factor = min(0.08*Nr, 0.6)
-    fpi_factor   = min(0.006*(FPI-10), 0.15) if FPI>=10 else -0.04
-    vel_factor   = max(0.04*(v_face-2.0), -0.08)
-    bpf = base - depth_factor - fpi_factor + vel_factor
-    return float(np.clip(bpf, 0.03, 0.25))
-
-def adp_bpf_leaving(air_in, ADP_C, BPF):
-    # Saturated enthalpy and humidity at ADP using our formulas
-    Psat = psat_water_Pa(ADP_C)
-    W_ADP = 0.62198 * Psat / max(P_ATM - Psat, 1.0)
-    h_ADP = h_moist_air_J_per_kg(ADP_C, W_ADP)
-    h_out = h_ADP + BPF*(air_in['h'] - h_ADP)
-    W_out = W_ADP + BPF*(air_in['W'] - W_ADP)
-    # Approximate T_out by solving enthalpy equation iteratively (simple secant)
-    def f_T(Tc):
-        return h_moist_air_J_per_kg(Tc, W_out) - h_out
-    T1, T2 = ADP_C, air_in['T']
-    for _ in range(20):
-        f1, f2 = f_T(T1), f_T(T2)
-        if abs(f2 - f1) < 1e-6: break
-        T3 = T2 - f2*(T2-T1)/max(f2-f1, 1e-6)
-        T1, T2 = T2, T3
-    T_out = T2
-    return dict(T_out=T_out, h_out=h_out, W_out=W_out)
-
-# ============================================================
-# UI
-# ============================================================
-st.set_page_config(page_title="Evaporator Coil Designer (No-HAPropsSI)", layout="wide")
-st.title("Evaporator Coil Designer — Textbook + Wet coil + ADP/BPF + ΔP (no HAPropsSI)")
-
-with st.sidebar:
-    st.header("Load & Air")
-    Q_kW = st.number_input("Cooling load (kW)", 1.0, 5000.0, 50.0, 1.0)
-    Tdb_in = st.number_input("Entering air dry-bulb (°C)", -20.0, 60.0, 27.0, 0.1)
-    RH_in  = st.number_input("Entering air RH (%)", 0.1, 100.0, 50.0, 0.1)
-    T_sat_ev = st.number_input("Evap saturation temp (°C)", -40.0, 20.0, 6.0, 0.1)
-
-    st.markdown("---")
-    st.subheader("Airflow")
-    mode = st.radio("Specify airflow", ["Face velocity (m/s)", "Volumetric flow (m³/h)"], horizontal=True)
-    W = st.number_input("Face width W (m)", 0.2, 4.0, 1.2, 0.05)
-    H = st.number_input("Face height H (m)", 0.2, 4.0, 1.0, 0.05)
-
-    st.markdown("---")
-    st.subheader("Refrigerant (CoolProp for fluids)")
-    if COOLPROP:
-        fluids = CP.get_global_param_string("fluids_list").split(',')
-        pref = [f for f in ["R410A","R454B","R32","R407C","R134a","R290","R22","R513A","R1234yf","CO2"] if f in fluids]
-        fluids = pref + [f for f in fluids if f not in pref]
-    else:
-        fluids = ["(CoolProp not available)"]
-    ref = st.selectbox("Refrigerant", fluids, index=0)
-    mdot_ref_hr = st.number_input("ṁ_ref total (kg/h)", 0.0, 100000.0, 800.0, 10.0)
-    N_circuits = st.number_input("Circuits (parallel)", 1, 200, 8, 1)
-    SH_out = st.number_input("Superheat at outlet (K)", 0.0, 20.0, 6.0, 0.5)
-
-st.markdown("### Geometry & Fins")
-c1, c2, c3, c4 = st.columns(4)
-with c1:
-    tube_pick = st.selectbox("Tube OD", ["3/8 in (9.525 mm)","1/2 in (12.7 mm)","Custom"])
-    if tube_pick == "3/8 in (9.525 mm)":
-        Do = 3/8*INCH
-    elif tube_pick == "1/2 in (12.7 mm)":
-        Do = 0.5*INCH
-    else:
-        Do = st.number_input("Tube OD (mm)", 4.0, 20.0, 9.525, 0.1)*MM
-    ti = st.number_input("Tube wall thickness (mm)", 0.3, 0.8, 0.5, 0.05)*MM
-    Di = max(Do - 2*ti, 1e-4)
-
-with c2:
-    pitch_pick = st.selectbox("Triangular pitch", ["1.00 in","1.25 in","Custom"])
-    if pitch_pick == "1.00 in":
-        pitch = 1.00*INCH
-    elif pitch_pick == "1.25 in":
-        pitch = 1.25*INCH
-    else:
-        pitch = st.number_input("Triangular pitch (mm)", 12.0, 60.0, 25.4, 0.5)*MM
-    St = pitch
-    Sl = pitch
-    Nr = st.number_input("Rows (depth)", 1, 12, 4, 1)
-
-with c3:
-    FPI = st.number_input("Fins per inch (FPI)", 6.0, 22.0, 12.0, 1.0)
-    tf = st.number_input("Fin thickness (mm)", 0.10, 0.15, 0.12, 0.01)*MM
-    fin_mat = st.selectbox("Fin material", ["Aluminum","Copper"])
-    k_fin = 200.0 if fin_mat == "Aluminum" else 380.0
-
-with c4:
-    air_model = st.selectbox("Air-side model", ["Zukauskas (tube-bank; plain fin baseline)",
-                                                 "Manglik–Bergles (offset-strip ≈ louvered)"])
-    user_ho = st.number_input("Override h_air (W/m²K) [optional]", 0.0, 1500.0, 0.0, 1.0)
-    wet_coil = st.checkbox("Wet coil (enhanced h via Lewis analogy)", value=True)
-    wet_factor = st.slider("Wet enhancement factor (×)", 1.10, 1.80, 1.40, 0.01)
-
-# Air / Flow
-air_in_props = air_props(Tdb_in, RH_in)
-face_area = W*H
-if mode == "Face velocity (m/s)":
-    v_face = st.number_input("Face velocity (m/s)", 0.5, 4.0, 2.2, 0.1)
+if af_mode == "Face velocity (m/s)":
+    v_face = st.number_input("Face velocity (m/s)", 0.2, 6.0, 3.0, 0.1)
     vol_flow = v_face * face_area
+    airflow_m3h = vol_flow * 3600.0
 else:
-    m3ph = st.number_input("Airflow (m³/h)", 500.0, 300000.0, 10000.0, 100.0)
-    vol_flow = m3ph/3600.0
-    v_face = vol_flow/face_area
-
+    airflow_m3h = st.number_input("Airflow (m³/h)", 500.0, 300000.0, 20000.0, 100.0)
+    vol_flow = airflow_m3h / 3600.0
+    v_face = vol_flow / max(face_area, 1e-9)
+st.caption(f"Airflow ≈ {airflow_m3h:,.0f} m³/h   |   Face velocity ≈ {v_face:.2f} m/s")
 mdot_air = air_in_props['rho']*vol_flow
 geom = geometry_areas(W, H, Nr, St, Sl, Do, tf, FPI)
 
